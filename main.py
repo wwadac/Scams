@@ -1,588 +1,669 @@
-import asyncio
 import logging
 import sqlite3
+import socket
+import sys
+import os
+import tempfile
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, PreCheckoutQueryHandler, MessageHandler, filters
 from datetime import datetime
-from aiogram import Bot, Dispatcher, F, Router
-from aiogram.types import (
-    Message, CallbackQuery, LabeledPrice, PreCheckoutQuery,
-    InlineKeyboardButton, InlineKeyboardMarkup
-)
-from aiogram.filters import Command, CommandStart
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-
-logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = "8237086271:AAFOo4KN1Xpht9iQB9zlk2NKX3D1dq1NND0"
 ADMIN_ID = 6893832048
 
-router = Router()
-bot: Bot = None
+logging.basicConfig(level=logging.INFO)
 
-# ==================== БАЗА ДАННЫХ ====================
-conn = sqlite3.connect('shop.db', check_same_thread=False)
-cursor = conn.cursor()
+def check_single_instance():
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(('localhost', 12345))
+        return True
+    except socket.error:
+        print("❌ Бот уже запущен! pkill -f python")
+        sys.exit(1)
 
-cursor.executescript('''
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        join_date TEXT
-    );
-    CREATE TABLE IF NOT EXISTS products (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        price INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS payments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        product_id INTEGER,
-        amount INTEGER,
-        charge_id TEXT,
-        date TEXT
-    );
-''')
-conn.commit()
+check_single_instance()
 
-
-# ==================== FSM СОСТОЯНИЯ ====================
-class AdminStates(StatesGroup):
-    waiting_product_name = State()
-    waiting_product_price = State()
-    waiting_new_product = State()
-    waiting_broadcast = State()
-
-
-# ==================== КЛАВИАТУРЫ ====================
-def get_shop_keyboard() -> InlineKeyboardMarkup:
-    """Клавиатура магазина для пользователей"""
-    builder = InlineKeyboardBuilder()
-    
-    cursor.execute("SELECT id, name, price FROM products ORDER BY id")
-    products = cursor.fetchall()
-    
-    for prod_id, name, price in products:
-        builder.button(
-            text=f"{name} — {price}⭐",
-            callback_data=f"buy:{prod_id}"
+def init_db():
+    conn = sqlite3.connect('payments.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            username TEXT,
+            first_name TEXT,
+            charge_id TEXT,
+            amount INTEGER,
+            product_name TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
-    
-    builder.button(text="📋 Мои покупки", callback_data="my_purchases")
-    builder.adjust(1)
-    return builder.as_markup()
-
-
-def get_admin_keyboard() -> InlineKeyboardMarkup:
-    """Главное меню админ-панели"""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📦 Управление товарами", callback_data="admin:products")],
-        [InlineKeyboardButton(text="➕ Добавить товар", callback_data="admin:add")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
-        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:broadcast")],
-    ])
-
-
-def get_products_list_keyboard() -> InlineKeyboardMarkup:
-    """Список товаров для редактирования"""
-    builder = InlineKeyboardBuilder()
-    
-    cursor.execute("SELECT id, name, price FROM products ORDER BY id")
-    products = cursor.fetchall()
-    
-    for prod_id, name, price in products:
-        builder.button(
-            text=f"📦 {name} ({price}⭐)",
-            callback_data=f"admin:edit:{prod_id}"
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            is_banned BOOLEAN DEFAULT FALSE,
+            has_subscription BOOLEAN DEFAULT FALSE,
+            join_date DATETIME DEFAULT CURRENT_TIMESTAMP
         )
-    
-    builder.button(text="◀️ Назад", callback_data="admin:menu")
-    builder.adjust(1)
-    return builder.as_markup()
-
-
-def get_edit_product_keyboard(product_id: int) -> InlineKeyboardMarkup:
-    """Клавиатура редактирования товара"""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✏️ Название", callback_data=f"admin:name:{product_id}"),
-            InlineKeyboardButton(text="💰 Цена", callback_data=f"admin:price:{product_id}")
-        ],
-        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"admin:del:{product_id}")],
-        [InlineKeyboardButton(text="◀️ К списку", callback_data="admin:products")]
-    ])
-
-
-def get_cancel_keyboard() -> InlineKeyboardMarkup:
-    """Кнопка отмены"""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="admin:cancel")]
-    ])
-
-
-def get_back_keyboard() -> InlineKeyboardMarkup:
-    """Кнопка назад"""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin:menu")]
-    ])
-
-
-# ==================== ПОЛЬЗОВАТЕЛЬСКИЕ КОМАНДЫ ====================
-@router.message(CommandStart())
-async def cmd_start(message: Message):
-    """Стартовая команда"""
-    cursor.execute(
-        "INSERT OR IGNORE INTO users (user_id, username, join_date) VALUES (?, ?, ?)",
-        (message.from_user.id, message.from_user.username, datetime.now().isoformat())
-    )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS admin_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    ''')
+    cursor.execute('INSERT OR IGNORE INTO admin_settings (key, value) VALUES ("new_users_notifications", "on")')
     conn.commit()
-    
-    await message.answer(
-        "🛍 <b>Добро пожаловать в магазин!</b>\n\n"
-        "Выберите товар из списка ниже:",
-        reply_markup=get_shop_keyboard(),
-        parse_mode="HTML"
-    )
+    conn.close()
 
+init_db()
 
-@router.callback_query(F.data.startswith("buy:"))
-async def process_purchase(callback: CallbackQuery):
-    """Обработка покупки"""
-    product_id = int(callback.data.split(":")[1])
-    
-    cursor.execute("SELECT name, price FROM products WHERE id = ?", (product_id,))
+PRODUCTS = {
+    "premium": {"name": "🌟 Premium Подписка", "price": 70, "description": "Доступ к приватному каналу на 30 дней"},
+    "video_100": {"name": "🎬 100 Видео", "price": 15, "description": "Пакет из 100 премиум видео"},
+    "video_1000": {"name": "📹 1000 Видео", "price": 25, "description": "Пакет из 1000 премиум видео"},
+    "video_10000": {"name": "🎥 10000 Видео + Канал", "price": 50, "description": "10000 видео + доступ к каналу"}
+}
+
+def get_admin_setting(key):
+    conn = sqlite3.connect('payments.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT value FROM admin_settings WHERE key = ?', (key,))
     result = cursor.fetchone()
-    
-    if not result:
-        await callback.answer("❌ Товар не найден!", show_alert=True)
+    conn.close()
+    return result[0] if result else "on"
+
+def set_admin_setting(key, value):
+    conn = sqlite3.connect('payments.db')
+    cursor = conn.cursor()
+    cursor.execute('INSERT OR REPLACE INTO admin_settings (key, value) VALUES (?, ?)', (key, value))
+    conn.commit()
+    conn.close()
+
+async def notify_admin(context: ContextTypes.DEFAULT_TYPE, message: str):
+    try:
+        await context.bot.send_message(ADMIN_ID, message, parse_mode='Markdown')
+    except Exception as e:
+        logging.error(f"Ошибка отправки админу: {e}")
+
+# Команда для скачивания базы данных
+async def download_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
         return
     
-    name, price = result
-    
-    await callback.message.answer_invoice(
-        title=f"Покупка: {name}",
-        description=f"Оплата товара «{name}»",
-        provider_token="",
-        currency="XTR",
-        prices=[LabeledPrice(label=name, amount=price)],
-        payload=f"buy:{product_id}"
-    )
-    await callback.answer()
+    try:
+        # Создаем временную копию базы данных
+        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as temp_file:
+            temp_path = temp_file.name
+        
+        # Копируем базу данных во временный файл
+        import shutil
+        shutil.copy2('payments.db', temp_path)
+        
+        # Отправляем файл
+        with open(temp_path, 'rb') as db_file:
+            await update.message.reply_document(
+                document=db_file,
+                filename='payments.db',
+                caption='📦 База данных бота'
+            )
+        
+        # Удаляем временный файл
+        os.unlink(temp_path)
+        
+        await update.message.reply_text("✅ База данных успешно отправлена!")
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка при выгрузке базы данных: {e}")
 
-
-@router.callback_query(F.data == "my_purchases")
-async def show_purchases(callback: CallbackQuery):
-    """Показать историю покупок"""
-    cursor.execute(
-        """SELECT p.name, pay.amount, pay.date 
-           FROM payments pay 
-           JOIN products p ON pay.product_id = p.id 
-           WHERE pay.user_id = ? 
-           ORDER BY pay.date DESC LIMIT 10""",
-        (callback.from_user.id,)
-    )
-    purchases = cursor.fetchall()
-    
-    if not purchases:
-        await callback.answer("📭 У вас пока нет покупок", show_alert=True)
+# Команда для загрузки базы данных
+async def upload_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
         return
     
-    text = "📋 <b>Ваши последние покупки:</b>\n\n"
-    for name, amount, date in purchases:
-        text += f"• {name} — {amount}⭐ ({date[:10]})\n"
+    if not update.message.document:
+        await update.message.reply_text("❌ Пожалуйста, отправьте файл базы данных (.db)")
+        return
     
-    await callback.message.answer(text, parse_mode="HTML")
-    await callback.answer()
+    document = update.message.document
+    
+    # Проверяем что это файл базы данных
+    if not document.file_name.endswith('.db'):
+        await update.message.reply_text("❌ Пожалуйста, отправьте файл с расширением .db")
+        return
+    
+    try:
+        # Скачиваем файл
+        file = await context.bot.get_file(document.file_id)
+        
+        # Создаем временный файл
+        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as temp_file:
+            temp_path = temp_file.name
+        
+        # Скачиваем во временный файл
+        await file.download_to_drive(temp_path)
+        
+        # Проверяем что файл является валидной SQLite базой
+        try:
+            test_conn = sqlite3.connect(temp_path)
+            test_cursor = test_conn.cursor()
+            
+            # Проверяем наличие основных таблиц
+            test_cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('users', 'payments', 'admin_settings')")
+            tables = test_cursor.fetchall()
+            
+            if len(tables) < 3:
+                await update.message.reply_text("❌ Файл не содержит все необходимые таблицы!")
+                os.unlink(temp_path)
+                return
+                
+            test_conn.close()
+            
+        except sqlite3.Error as e:
+            await update.message.reply_text(f"❌ Файл не является валидной SQLite базой данных: {e}")
+            os.unlink(temp_path)
+            return
+        
+        # Создаем бэкап текущей базы
+        backup_path = f'payments_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
+        import shutil
+        shutil.copy2('payments.db', backup_path)
+        
+        # Заменяем текущую базу данных
+        shutil.copy2(temp_path, 'payments.db')
+        
+        # Удаляем временный файл
+        os.unlink(temp_path)
+        
+        await update.message.reply_text(
+            f"✅ База данных успешно обновлена!\n"
+            f"📁 Бэкап сохранен как: {backup_path}"
+        )
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка при загрузке базы данных: {e}")
 
+# Команда для создания бэкапа
+async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        backup_path = f'payments_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
+        import shutil
+        shutil.copy2('payments.db', backup_path)
+        
+        # Отправляем бэкап
+        with open(backup_path, 'rb') as backup_file:
+            await update.message.reply_document(
+                document=backup_file,
+                filename=os.path.basename(backup_path),
+                caption='💾 Бэкап базы данных'
+            )
+        
+        await update.message.reply_text("✅ Бэкап создан и отправлен!")
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка при создании бэкапа: {e}")
 
-@router.pre_checkout_query()
-async def pre_checkout(query: PreCheckoutQuery):
-    """Подтверждение оплаты"""
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    conn = sqlite3.connect('payments.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT * FROM users WHERE user_id = ?', (user.id,))
+    existing_user = cursor.fetchone()
+    
+    cursor.execute('INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?, ?, ?)',
+                   (user.id, user.username, user.first_name))
+    conn.commit()
+    conn.close()
+    
+    if not existing_user and get_admin_setting("new_users_notifications") == "on":
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        message = f"""🆕 *НОВЫЙ ПОЛЬЗОВАТЕЛЬ*
+
+👤 Имя: {user.first_name}
+📛 Ник: @{user.username or 'нет'}
+🆔 ID: `{user.id}`
+🕐 Время: {current_time}"""
+        await notify_admin(context, message)
+
+    keyboard = [
+        [InlineKeyboardButton("🌟 Premium Подписка - 70 звезд", callback_data="premium")],
+        [InlineKeyboardButton("📁 Видео", callback_data="videos")],
+        [InlineKeyboardButton("💬 Тех. Поддержка", callback_data="support")],
+        [InlineKeyboardButton("ℹ️ О боте", callback_data="about")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    text = """🛍️ *Добро пожаловать в магазин!*
+
+Выберите раздел:"""
+    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "videos":
+        keyboard = [
+            [InlineKeyboardButton("🎬 100 Видео - 15 звезд", callback_data="video_100")],
+            [InlineKeyboardButton("📹 1000 Видео - 25 звезд", callback_data="video_1000")],
+            [InlineKeyboardButton("🎥 10000 Видео + Канал - 50 звезд", callback_data="video_10000")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="back_main")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text("📁 *Раздел с видео*\n\nВыберите пакет:", reply_markup=reply_markup, parse_mode='Markdown')
+
+    elif query.data == "support":
+        context.user_data['awaiting_support'] = True
+        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_main")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        text = """💬 *Техническая поддержка*
+
+Напишите ваш вопрос и администратор скоро ответит.
+
+Просто напишите сообщение с вашим вопросом:"""
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+    elif query.data == "about":
+        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_main")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        text = """🎁 ЭкcклюzивHый koHтeHт, kotopый Bы He H@йдеTe бoльwе Hигде
+
+Этoт бот oткpывает двеpи к HеoгpaHиченHому пoтoky экcклюzивHогo koHтeHта, дocтуп к kotopому Bы мoжеtе пoлyчить tольkо y Hас! Mы пpеdlагаем дocтупHые, безопасHые и аHоHимHые yсlуги.
+
+🌟 Pрemиum-Подпucка
+Достуp к пpиватHому kаHаlу c более чем 30.000 tыcяч видео подобHогo xаракtера. В cлучае yдаlения осHовHогo kаHаlа, мы гоtовы пpедоставить Bам достуp к доpолHиtельHому!
+
+📁 Видеоrакеты
+РазlичHые pакеты видеомаtеpиалoв pо пpивлекаtеlьHым ценам. Рассмаtрuвайtе этo как возможность опробовать Hаwи yслyги перед tем, kак пpиобpеcти pодписку.
+
+ВозpастHые огpаничения: от 14 до 18 леt."""
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+    elif query.data == "back_main":
+        context.user_data.pop('awaiting_support', None)
+        keyboard = [
+            [InlineKeyboardButton("🌟 Premium Подписка - 70 звезд", callback_data="premium")],
+            [InlineKeyboardButton("📁 Видео", callback_data="videos")],
+            [InlineKeyboardButton("💬 Тех. Поддержка", callback_data="support")],
+            [InlineKeyboardButton("ℹ️ О боте", callback_data="about")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text("🛍️ *Добро пожаловать в магазин!*\n\nВыберите раздел:", reply_markup=reply_markup, parse_mode='Markdown')
+
+    elif query.data in PRODUCTS:
+        product = PRODUCTS[query.data]
+        await context.bot.send_invoice(
+            chat_id=query.message.chat_id,
+            title=product["name"],
+            description=product["description"],
+            payload=query.data,
+            currency="XTR",
+            prices=[{"label": "Stars", "amount": product["price"]}],
+        )
+
+# Админские команды
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        return
+
+    keyboard = [
+        [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton("📢 Быстрая рассылка", callback_data="quick_broadcast")],
+        [InlineKeyboardButton("🔔 Уведомления ВКЛ", callback_data="notifications_off"), 
+         InlineKeyboardButton("🔕 Уведомления ВЫКЛ", callback_data="notifications_on")],
+        [InlineKeyboardButton("👥 Все пользователи", callback_data="all_users")],
+        [InlineKeyboardButton("💾 Управление БД", callback_data="db_management")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    text = """👑 *Панель администратора*
+
+Выберите действие:"""
+    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "admin_stats":
+        conn = sqlite3.connect('payments.db')
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT COUNT(*) FROM users')
+        total_users = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM payments')
+        total_payments = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT SUM(amount) FROM payments')
+        total_stars = cursor.fetchone()[0] or 0
+        
+        cursor.execute('SELECT COUNT(*) FROM users WHERE has_subscription = TRUE')
+        premium_users = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM users WHERE DATE(join_date) = DATE("now")')
+        new_today = cursor.fetchone()[0]
+        
+        conn.close()
+
+        text = f"""📊 *Статистика за все время*
+
+👥 Всего пользователей: {total_users}
+💎 Премиум пользователей: {premium_users}
+💰 Всего платежей: {total_payments}
+⭐ Всего звезд: {total_stars}
+🆕 Новых сегодня: {new_today}"""
+
+        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_admin")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+    elif query.data == "quick_broadcast":
+        context.user_data['awaiting_broadcast'] = True
+        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_admin")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text("📢 *Быстрая рассылка*\n\nВведите сообщение для рассылки:", reply_markup=reply_markup, parse_mode='Markdown')
+
+    elif query.data == "notifications_on":
+        set_admin_setting("new_users_notifications", "on")
+        await query.edit_message_text("✅ Уведомления о новых пользователях ВКЛЮЧЕНЫ")
+
+    elif query.data == "notifications_off":
+        set_admin_setting("new_users_notifications", "off")
+        await query.edit_message_text("✅ Уведомления о новых пользователях ВЫКЛЮЧЕНЫ")
+
+    elif query.data == "all_users":
+        conn = sqlite3.connect('payments.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id, username, first_name, join_date FROM users ORDER BY join_date DESC')
+        users = cursor.fetchall()
+        conn.close()
+
+        if not users:
+            await query.edit_message_text("📭 Пользователей нет")
+            return
+
+        text = f"👥 *Все пользователи ({len(users)}):*\n\n"
+        for user in users:
+            user_id, username, first_name, join_date = user
+            text += f"👤 {first_name} (@{username or 'нет'})\n🆔 {user_id}\n🕐 {join_date}\n\n"
+
+        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_admin")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Разбиваем сообщение если слишком длинное
+        if len(text) > 4096:
+            parts = [text[i:i+4096] for i in range(0, len(text), 4096)]
+            await query.edit_message_text(parts[0], reply_markup=reply_markup)
+            for part in parts[1:]:
+                await context.bot.send_message(chat_id=query.message.chat_id, text=part)
+        else:
+            await query.edit_message_text(text, reply_markup=reply_markup)
+
+    elif query.data == "db_management":
+        keyboard = [
+            [InlineKeyboardButton("📥 Скачать БД", callback_data="download_db")],
+            [InlineKeyboardButton("💾 Создать бэкап", callback_data="backup_db")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="back_admin")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text("💾 *Управление базой данных*\n\nВыберите действие:", reply_markup=reply_markup, parse_mode='Markdown')
+
+    elif query.data == "download_db":
+        await query.edit_message_text("📥 Скачиваю базу данных...")
+        await download_db_callback(update, context)
+
+    elif query.data == "backup_db":
+        await query.edit_message_text("💾 Создаю бэкап...")
+        await backup_db_callback(update, context)
+
+    elif query.data == "back_admin":
+        await admin_panel_callback(update, context)
+
+async def download_db_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    try:
+        # Создаем временную копию базы данных
+        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as temp_file:
+            temp_path = temp_file.name
+        
+        # Копируем базу данных во временный файл
+        import shutil
+        shutil.copy2('payments.db', temp_path)
+        
+        # Отправляем файл
+        with open(temp_path, 'rb') as db_file:
+            await context.bot.send_document(
+                chat_id=query.message.chat_id,
+                document=db_file,
+                filename='payments.db',
+                caption='📦 База данных бота'
+            )
+        
+        # Удаляем временный файл
+        os.unlink(temp_path)
+        
+        await query.edit_message_text("✅ База данных успешно отправлена!")
+        
+    except Exception as e:
+        await query.edit_message_text(f"❌ Ошибка при выгрузке базы данных: {e}")
+
+async def backup_db_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    try:
+        backup_path = f'payments_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
+        import shutil
+        shutil.copy2('payments.db', backup_path)
+        
+        # Отправляем бэкап
+        with open(backup_path, 'rb') as backup_file:
+            await context.bot.send_document(
+                chat_id=query.message.chat_id,
+                document=backup_file,
+                filename=os.path.basename(backup_path),
+                caption='💾 Бэкап базы данных'
+            )
+        
+        await query.edit_message_text("✅ Бэкап создан и отправлен!")
+        
+    except Exception as e:
+        await query.edit_message_text(f"❌ Ошибка при создании бэкапа: {e}")
+
+async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    
+    keyboard = [
+        [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton("📢 Быстрая рассылка", callback_data="quick_broadcast")],
+        [InlineKeyboardButton("🔔 Уведомления ВКЛ", callback_data="notifications_off"), 
+         InlineKeyboardButton("🔕 Уведомления ВЫКЛ", callback_data="notifications_on")],
+        [InlineKeyboardButton("👥 Все пользователи", callback_data="all_users")],
+        [InlineKeyboardButton("💾 Управление БД", callback_data="db_management")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    text = """👑 *Панель администратора*
+
+Выберите действие:"""
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+# Обработчик текстовых сообщений
+async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    
+    if context.user_data.get('awaiting_support'):
+        user = update.message.from_user
+        question = update.message.text
+
+        admin_msg = f"""💬 *НОВЫЙ ВОПРОС В ТЕХПОДДЕРЖКУ*
+
+👤 Пользователь: {user.first_name} (@{user.username or 'нет'})
+🆔 ID: {user.id}
+🕐 Время: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+❓ Вопрос:
+{question}"""
+
+        await notify_admin(context, admin_msg)
+        await update.message.reply_text("✅ Ваш вопрос отправлен администратору. Ожидайте ответа в ближайшее время!")
+        context.user_data.pop('awaiting_support', None)
+
+    elif context.user_data.get('awaiting_broadcast') and user_id == ADMIN_ID:
+        message = update.message.text
+        conn = sqlite3.connect('payments.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id FROM users WHERE is_banned = FALSE')
+        users = cursor.fetchall()
+        conn.close()
+
+        sent = 0
+        failed = 0
+        for user in users:
+            try:
+                await context.bot.send_message(user[0], f"📢 *Рассылка:*\n\n{message}", parse_mode='Markdown')
+                sent += 1
+            except:
+                failed += 1
+
+        context.user_data.pop('awaiting_broadcast', None)
+        await update.message.reply_text(f"✅ Рассылка завершена!\n\n📤 Отправлено: {sent}\n❌ Не отправлено: {failed}")
+
+    # Обработка ответов админа на вопросы
+    elif context.user_data.get('awaiting_reply') and user_id == ADMIN_ID:
+        user_id_to_reply = context.user_data.get('reply_user_id')
+        message = update.message.text
+        
+        try:
+            await context.bot.send_message(
+                user_id_to_reply, 
+                f"💬 *ОТВЕТ АДМИНИСТРАТОРА:*\n\n{message}", 
+                parse_mode='Markdown'
+            )
+            await update.message.reply_text(f"✅ Ответ отправлен пользователю {user_id_to_reply}")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка отправки: {e}")
+        
+        context.user_data.pop('awaiting_reply', None)
+        context.user_data.pop('reply_user_id', None)
+
+# Команда для ответа на вопросы техподдержки
+async def reply_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text("❌ Используй: /reply <user_id> <сообщение>")
+        return
+
+    try:
+        user_id = int(context.args[0])
+        message = ' '.join(context.args[1:])
+
+        await context.bot.send_message(
+            user_id, 
+            f"💬 *ОТВЕТ АДМИНИСТРАТОРА:*\n\n{message}", 
+            parse_mode='Markdown'
+        )
+        await update.message.reply_text(f"✅ Ответ отправлен пользователю {user_id}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+# Команда для отправки сообщения от имени администратора
+async def tell_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text("❌ Используй: /tell <user_id> <сообщение>")
+        return
+
+    try:
+        user_id = int(context.args[0])
+        message = ' '.join(context.args[1:])
+
+        await context.bot.send_message(
+            user_id, 
+            f"👑 *АДМИНИСТРАТОР:*\n\n{message}", 
+            parse_mode='Markdown'
+        )
+        await update.message.reply_text(f"✅ Сообщение отправлено пользователю {user_id}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+async def pre_checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.pre_checkout_query
     await query.answer(ok=True)
 
+async def successful_payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    payment = update.message.successful_payment
+    user = update.message.from_user
 
-@router.message(F.successful_payment)
-async def successful_payment(message: Message):
-    """Успешная оплата"""
-    payment = message.successful_payment
-    product_id = int(payment.invoice_payload.split(":")[1])
-    
-    cursor.execute(
-        "INSERT INTO payments (user_id, product_id, amount, charge_id, date) VALUES (?, ?, ?, ?, ?)",
-        (message.from_user.id, product_id, payment.total_amount, 
-         payment.telegram_payment_charge_id, datetime.now().isoformat())
-    )
+    conn = sqlite3.connect('payments.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO payments (user_id, username, first_name, charge_id, amount, product_name)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (user.id, user.username, user.first_name, payment.telegram_payment_charge_id,
+          payment.total_amount, payment.invoice_payload))
+
+    if payment.invoice_payload == "premium":
+        cursor.execute('UPDATE users SET has_subscription = TRUE WHERE user_id = ?', (user.id,))
+
     conn.commit()
-    
-    cursor.execute("SELECT name FROM products WHERE id = ?", (product_id,))
-    product_name = cursor.fetchone()[0]
-    
-    await message.answer(
-        f"✅ <b>Оплата успешна!</b>\n\n"
-        f"📦 Товар: {product_name}\n"
-        f"💰 Сумма: {payment.total_amount}⭐\n"
-        f"🆔 Транзакция: <code>{payment.telegram_payment_charge_id}</code>\n\n"
-        "Спасибо за покупку! 🎉",
-        parse_mode="HTML"
-    )
+    conn.close()
 
+    admin_msg = f"""💰 *НОВАЯ ОПЛАТА*
 
-# ==================== АДМИН-ПАНЕЛЬ ====================
-def is_admin(user_id: int) -> bool:
-    """Проверка на админа"""
-    return user_id == ADMIN_ID
+👤 Пользователь: {user.first_name} (@{user.username or 'нет'})
+🆔 ID: {user.id}
+📦 Товар: {PRODUCTS[payment.invoice_payload]['name']}
+💎 Сумма: {payment.total_amount} звезд
+🆔 Charge ID: {payment.telegram_payment_charge_id}
+🕐 Время: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}"""
 
+    await notify_admin(context, admin_msg)
 
-@router.message(Command("admin"))
-async def cmd_admin(message: Message, state: FSMContext):
-    """Вход в админ-панель"""
-    if not is_admin(message.from_user.id):
-        return
-    
-    await state.clear()
-    await message.answer(
-        "⚙️ <b>Админ-панель</b>\n\nВыберите действие:",
-        reply_markup=get_admin_keyboard(),
-        parse_mode="HTML"
-    )
+    user_msg = f"""✅ *Оплата прошла успешно!*
 
+📦 Товар: {PRODUCTS[payment.invoice_payload]['name']}
+💎 Сумма: {payment.total_amount} звезд
 
-@router.callback_query(F.data == "admin:menu")
-async def admin_menu(callback: CallbackQuery, state: FSMContext):
-    """Главное меню админки"""
-    if not is_admin(callback.from_user.id):
-        return
-    
-    await state.clear()
-    await callback.message.edit_text(
-        "⚙️ <b>Админ-панель</b>\n\nВыберите действие:",
-        reply_markup=get_admin_keyboard(),
-        parse_mode="HTML"
-    )
+Спасибо за покупку! 🎉"""
 
+    await update.message.reply_text(user_msg, parse_mode='Markdown')
 
-@router.callback_query(F.data == "admin:cancel")
-async def admin_cancel(callback: CallbackQuery, state: FSMContext):
-    """Отмена действия"""
-    if not is_admin(callback.from_user.id):
-        return
-    
-    await state.clear()
-    await callback.message.edit_text(
-        "❌ Действие отменено\n\n⚙️ <b>Админ-панель</b>",
-        reply_markup=get_admin_keyboard(),
-        parse_mode="HTML"
-    )
+def main():
+    application = Application.builder().token(BOT_TOKEN).build()
 
+    # Основные команды
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("admin", admin_panel))
+    
+    # Новые команды для админа
+    application.add_handler(CommandHandler("reply", reply_to_user))
+    application.add_handler(CommandHandler("tell", tell_user))
+    application.add_handler(CommandHandler("download_db", download_db))
+    application.add_handler(CommandHandler("backup_db", backup_db))
+    application.add_handler(CommandHandler("upload_db", upload_db))
+    
+    # Обработчики callback
+    application.add_handler(CallbackQueryHandler(button_handler, pattern="^(premium|videos|support|about|back_main|video_100|video_1000|video_10000)$"))
+    application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^(admin_stats|quick_broadcast|notifications_on|notifications_off|all_users|back_admin|db_management|download_db|backup_db)$"))
+    
+    # Обработчики сообщений
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
+    application.add_handler(MessageHandler(filters.Document.ALL, upload_db))  # Обработчик загрузки файлов
+    application.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
+    application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
 
-# --- Управление товарами ---
-@router.callback_query(F.data == "admin:products")
-async def admin_products(callback: CallbackQuery):
-    """Список товаров"""
-    if not is_admin(callback.from_user.id):
-        return
-    
-    cursor.execute("SELECT COUNT(*) FROM products")
-    count = cursor.fetchone()[0]
-    
-    await callback.message.edit_text(
-        f"📦 <b>Управление товарами</b>\n\nВсего товаров: {count}\n\nВыберите товар для редактирования:",
-        reply_markup=get_products_list_keyboard(),
-        parse_mode="HTML"
-    )
-
-
-@router.callback_query(F.data.startswith("admin:edit:"))
-async def admin_edit_product(callback: CallbackQuery):
-    """Меню редактирования товара"""
-    if not is_admin(callback.from_user.id):
-        return
-    
-    product_id = int(callback.data.split(":")[2])
-    
-    cursor.execute("SELECT name, price FROM products WHERE id = ?", (product_id,))
-    result = cursor.fetchone()
-    
-    if not result:
-        await callback.answer("❌ Товар не найден!", show_alert=True)
-        return
-    
-    name, price = result
-    
-    await callback.message.edit_text(
-        f"📦 <b>Редактирование товара</b>\n\n"
-        f"🆔 ID: <code>{product_id}</code>\n"
-        f"📝 Название: <code>{name}</code>\n"
-        f"💰 Цена: <code>{price}⭐</code>\n\n"
-        f"Выберите что изменить:",
-        reply_markup=get_edit_product_keyboard(product_id),
-        parse_mode="HTML"
-    )
-
-
-@router.callback_query(F.data.startswith("admin:name:"))
-async def admin_change_name(callback: CallbackQuery, state: FSMContext):
-    """Начало изменения названия"""
-    if not is_admin(callback.from_user.id):
-        return
-    
-    product_id = int(callback.data.split(":")[2])
-    
-    await state.set_state(AdminStates.waiting_product_name)
-    await state.update_data(product_id=product_id)
-    
-    await callback.message.edit_text(
-        "✏️ <b>Изменение названия</b>\n\nОтправьте новое название товара:",
-        reply_markup=get_cancel_keyboard(),
-        parse_mode="HTML"
-    )
-
-
-@router.message(AdminStates.waiting_product_name)
-async def process_new_name(message: Message, state: FSMContext):
-    """Обработка нового названия"""
-    if not is_admin(message.from_user.id):
-        return
-    
-    data = await state.get_data()
-    product_id = data["product_id"]
-    new_name = message.text.strip()
-    
-    cursor.execute("UPDATE products SET name = ? WHERE id = ?", (new_name, product_id))
-    conn.commit()
-    
-    await state.clear()
-    await message.answer(
-        f"✅ Название изменено на: <code>{new_name}</code>",
-        reply_markup=get_admin_keyboard(),
-        parse_mode="HTML"
-    )
-
-
-@router.callback_query(F.data.startswith("admin:price:"))
-async def admin_change_price(callback: CallbackQuery, state: FSMContext):
-    """Начало изменения цены"""
-    if not is_admin(callback.from_user.id):
-        return
-    
-    product_id = int(callback.data.split(":")[2])
-    
-    await state.set_state(AdminStates.waiting_product_price)
-    await state.update_data(product_id=product_id)
-    
-    await callback.message.edit_text(
-        "💰 <b>Изменение цены</b>\n\nОтправьте новую цену (целое число):",
-        reply_markup=get_cancel_keyboard(),
-        parse_mode="HTML"
-    )
-
-
-@router.message(AdminStates.waiting_product_price)
-async def process_new_price(message: Message, state: FSMContext):
-    """Обработка новой цены"""
-    if not is_admin(message.from_user.id):
-        return
-    
-    try:
-        new_price = int(message.text.strip())
-        if new_price <= 0:
-            raise ValueError
-    except ValueError:
-        await message.answer("❌ Введите положительное целое число!")
-        return
-    
-    data = await state.get_data()
-    product_id = data["product_id"]
-    
-    cursor.execute("UPDATE products SET price = ? WHERE id = ?", (new_price, product_id))
-    conn.commit()
-    
-    await state.clear()
-    await message.answer(
-        f"✅ Цена изменена на: <code>{new_price}⭐</code>",
-        reply_markup=get_admin_keyboard(),
-        parse_mode="HTML"
-    )
-
-
-@router.callback_query(F.data.startswith("admin:del:"))
-async def admin_delete_product(callback: CallbackQuery):
-    """Удаление товара"""
-    if not is_admin(callback.from_user.id):
-        return
-    
-    product_id = int(callback.data.split(":")[2])
-    
-    cursor.execute("DELETE FROM products WHERE id = ?", (product_id,))
-    conn.commit()
-    
-    await callback.answer("🗑 Товар удалён!", show_alert=True)
-    
-    # Возврат к списку товаров
-    await callback.message.edit_text(
-        "📦 <b>Управление товарами</b>\n\nВыберите товар для редактирования:",
-        reply_markup=get_products_list_keyboard(),
-        parse_mode="HTML"
-    )
-
-
-# --- Добавление товара ---
-@router.callback_query(F.data == "admin:add")
-async def admin_add_product(callback: CallbackQuery, state: FSMContext):
-    """Начало добавления товара"""
-    if not is_admin(callback.from_user.id):
-        return
-    
-    await state.set_state(AdminStates.waiting_new_product)
-    
-    await callback.message.edit_text(
-        "➕ <b>Добавление товара</b>\n\n"
-        "Отправьте данные в формате:\n"
-        "<code>Название | Цена</code>\n\n"
-        "Пример: <code>VIP доступ | 100</code>",
-        reply_markup=get_cancel_keyboard(),
-        parse_mode="HTML"
-    )
-
-
-@router.message(AdminStates.waiting_new_product)
-async def process_new_product(message: Message, state: FSMContext):
-    """Обработка нового товара"""
-    if not is_admin(message.from_user.id):
-        return
-    
-    try:
-        parts = message.text.split("|")
-        if len(parts) != 2:
-            raise ValueError("Неверный формат")
-        
-        name = parts[0].strip()
-        price = int(parts[1].strip())
-        
-        if not name or price <= 0:
-            raise ValueError("Пустое название или неверная цена")
-        
-        cursor.execute("INSERT INTO products (name, price) VALUES (?, ?)", (name, price))
-        conn.commit()
-        
-        await state.clear()
-        await message.answer(
-            f"✅ <b>Товар добавлен!</b>\n\n"
-            f"📝 Название: <code>{name}</code>\n"
-            f"💰 Цена: <code>{price}⭐</code>",
-            reply_markup=get_admin_keyboard(),
-            parse_mode="HTML"
-        )
-    except Exception:
-        await message.answer(
-            "❌ <b>Ошибка формата!</b>\n\n"
-            "Используйте: <code>Название | Цена</code>",
-            parse_mode="HTML"
-        )
-
-
-# --- Статистика ---
-@router.callback_query(F.data == "admin:stats")
-async def admin_stats(callback: CallbackQuery):
-    """Статистика бота"""
-    if not is_admin(callback.from_user.id):
-        return
-    
-    cursor.execute("SELECT COUNT(*) FROM users")
-    users_count = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM products")
-    products_count = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM payments")
-    payments_count, total_stars = cursor.fetchone()
-    
-    cursor.execute("SELECT COUNT(*) FROM users WHERE date(join_date) = date('now')")
-    today_users = cursor.fetchone()[0]
-    
-    await callback.message.edit_text(
-        f"📊 <b>Статистика бота</b>\n\n"
-        f"👥 Всего пользователей: <code>{users_count}</code>\n"
-        f"🆕 Новых сегодня: <code>{today_users}</code>\n"
-        f"📦 Товаров: <code>{products_count}</code>\n"
-        f"💳 Платежей: <code>{payments_count}</code>\n"
-        f"⭐ Заработано звёзд: <code>{total_stars}</code>",
-        reply_markup=get_back_keyboard(),
-        parse_mode="HTML"
-    )
-
-
-# --- Рассылка ---
-@router.callback_query(F.data == "admin:broadcast")
-async def admin_broadcast(callback: CallbackQuery, state: FSMContext):
-    """Начало рассылки"""
-    if not is_admin(callback.from_user.id):
-        return
-    
-    cursor.execute("SELECT COUNT(*) FROM users")
-    users_count = cursor.fetchone()[0]
-    
-    await state.set_state(AdminStates.waiting_broadcast)
-    
-    await callback.message.edit_text(
-        f"📢 <b>Рассылка</b>\n\n"
-        f"Получателей: <code>{users_count}</code>\n\n"
-        f"Отправьте текст для рассылки:",
-        reply_markup=get_cancel_keyboard(),
-        parse_mode="HTML"
-    )
-
-
-@router.message(AdminStates.waiting_broadcast)
-async def process_broadcast(message: Message, state: FSMContext):
-    """Выполнение рассылки"""
-    if not is_admin(message.from_user.id):
-        return
-    
-    await state.clear()
-    
-    cursor.execute("SELECT user_id FROM users")
-    users = cursor.fetchall()
-    
-    status_msg = await message.answer("📤 <b>Рассылка началась...</b>", parse_mode="HTML")
-    
-    success = 0
-    failed = 0
-    
-    for (user_id,) in users:
-        try:
-            await bot.send_message(user_id, message.text)
-            success += 1
-        except Exception:
-            failed += 1
-        
-        # Небольшая задержка чтобы не превысить лимиты
-        if (success + failed) % 25 == 0:
-            await asyncio.sleep(1)
-    
-    await status_msg.edit_text(
-        f"✅ <b>Рассылка завершена!</b>\n\n"
-        f"📤 Успешно: <code>{success}</code>\n"
-        f"❌ Ошибок: <code>{failed}</code>",
-        reply_markup=get_admin_keyboard(),
-        parse_mode="HTML"
-    )
-
-
-# ==================== ЗАПУСК БОТА ====================
-async def main():
-    global bot
-    
-    bot = Bot(token=BOT_TOKEN)
-    dp = Dispatcher(storage=MemoryStorage())
-    dp.include_router(router)
-    
-    logging.info("✅ Бот запущен!")
-    
-    await dp.start_polling(bot)
-
+    application.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
