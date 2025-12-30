@@ -15,7 +15,7 @@ FILE_DIR = "uploads"                            # Папка для времен
 os.makedirs(FILE_DIR, exist_ok=True)
 
 # Задержка между отправками (в секундах)
-DELAY = 20  # 5 секунд по умолчанию
+DELAY = 5  # 5 секунд по умолчанию
 DELAY_UNIT = "seconds"  # seconds или minutes
 
 # === БД ===
