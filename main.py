@@ -95,7 +95,7 @@ async def admin_stats(callback: CallbackQuery):
 async def admin_broadcast_init(callback: CallbackQuery):
     await callback.message.answer("Отправьте сообщение для рассылки.")
 
-@router.message(F.text & F.from_user.id == ВАШ_ID_АДМИНА)
+@router.message(F.text & F.from_user.id == 6893832048)
 async def admin_broadcast_send(message: Message):
     # Простая проверка на ответ сообщением с текстом "рассылка"
     if message.reply_to_message and "рассылка" in message.reply_to_message.text.lower():
@@ -116,3 +116,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
