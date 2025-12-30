@@ -230,11 +230,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # 5️⃣_main_ – настройка Application и запуск
 # ----------------------------------------------------------------------
 def main() -> None:
-    """
-    Точка входа. Замените `YOUR_BOT_TOKEN` на токен вашего бота.
-    """
+
     # ----> ВАШ ТОКЕН <----
-    token = "YOUR_BOT_TOKEN"
+    token = "8237086271:AAFOo4KN1Xpht9iQB9zlk2NKX3D1dq1NND0"
 
     # Создаём приложение (async)
     application = Application.builder().token(token).build()
@@ -259,3 +257,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
