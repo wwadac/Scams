@@ -3,13 +3,16 @@ import logging
 import sqlite3
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery, InlineKeyboardButton, InlineKeyboardMarkup
-from aiogram.filters import Command
+from aiogram.types import (
+    Message, CallbackQuery, LabeledPrice, PreCheckoutQuery,
+    InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle,
+    InputTextMessageContent, InlineQuery, ChosenInlineResult
+)
+from aiogram.filters import Command, CommandStart
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 logging.basicConfig(level=logging.INFO)
 
-# ТОКЕН И АДМИН
 BOT_TOKEN = "8237086271:AAFOo4KN1Xpht9iQB9zlk2NKX3D1dq1NND0"
 ADMIN_ID = 6893832048
 
@@ -20,22 +23,22 @@ conn = sqlite3.connect('scam_bot.db', check_same_thread=False)
 c = conn.cursor()
 c.execute('''CREATE TABLE IF NOT EXISTS payments (user_id INT, amount INT, charge_id TEXT, date TEXT)''')
 c.execute('''CREATE TABLE IF NOT EXISTS users (user_id INT PRIMARY KEY, join_date TEXT)''')
-c.execute('''CREATE TABLE IF NOT EXISTS products (name TEXT, price INT)''')
-c.execute("INSERT OR IGNORE INTO products VALUES ('Доступ к каналу', 50), ('1000 видео', 25), ('500 видео', 10)")
+c.execute('''CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, price INT)''')
+# Начальные товары
+c.execute("INSERT OR IGNORE INTO products (name, price) VALUES ('Доступ к каналу', 50), ('1000 видео', 25), ('500 видео', 10)")
 conn.commit()
 
-# КЛАВИАТУРА МАГАЗИНА
+# ==================== ПОЛЬЗОВАТЕЛЬСКАЯ ЧАСТЬ ====================
 def store_keyboard():
     builder = InlineKeyboardBuilder()
-    c.execute("SELECT name, price FROM products")
-    for prod_name, prod_price in c.fetchall():
-        builder.button(text=f"{prod_name} - {prod_price}⭐", callback_data=f"buy_{prod_name}")
+    c.execute("SELECT id, name, price FROM products")
+    for prod_id, prod_name, prod_price in c.fetchall():
+        builder.button(text=f"{prod_name} - {prod_price}⭐", callback_data=f"buy_{prod_id}")
     builder.button(text="🛒 Мои заказы", callback_data="my_orders")
     builder.adjust(1)
     return builder.as_markup()
 
-# КОМАНДА /start
-@router.message(Command("start"))
+@router.message(CommandStart())
 async def start_cmd(message: Message):
     c.execute("INSERT OR IGNORE INTO users (user_id, join_date) VALUES (?, ?)", (message.from_user.id, datetime.now().isoformat()))
     conn.commit()
@@ -45,27 +48,25 @@ async def start_cmd(message: Message):
         parse_mode="Markdown"
     )
 
-# ПОКУПКА ТОВАРА
 @router.callback_query(F.data.startswith("buy_"))
 async def buy_process(callback: CallbackQuery):
-    product = callback.data.split("_", 1)[1]
-    c.execute("SELECT price FROM products WHERE name=?", (product,))
-    price = c.fetchone()[0]
+    product_id = int(callback.data.split("_")[1])
+    c.execute("SELECT name, price FROM products WHERE id=?", (product_id,))
+    product_name, price = c.fetchone()
+    
     await callback.message.answer_invoice(
-        title=f"Покупка: {product}",
+        title=f"Покупка: {product_name}",
         description=f"Мгновенная доставка после оплаты.",
         provider_token="",
         currency="XTR",
-        prices=[LabeledPrice(label=product, amount=price)],
-        payload=f"payload_{product}_{callback.from_user.id}"
+        prices=[LabeledPrice(label=product_name, amount=price)],
+        payload=f"payload_{product_id}_{callback.from_user.id}"
     )
 
-# ПОДТВЕРЖДЕНИЕ ОПЛАТЫ
 @router.pre_checkout_query()
 async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
     await pre_checkout_query.answer(ok=True)
 
-# УСПЕШНАЯ ОПЛАТА (ОБМАН)
 @router.message(F.successful_payment)
 async def successful_payment(message: Message):
     c.execute("INSERT INTO payments (user_id, amount, charge_id, date) VALUES (?, ?, ?, ?)",
@@ -82,72 +83,200 @@ async def successful_payment(message: Message):
         parse_mode="Markdown"
     )
 
-# ПОВТОРНАЯ ОПЛАТА
 @router.callback_query(F.data == "retry_payment")
 async def retry_payment(callback: CallbackQuery):
     await callback.message.answer("⚠️ Используйте /start чтобы выбрать товар заново.")
 
-# АДМИН: ИЗМЕНИТЬ ЦЕНУ
-@router.message(Command("setprice"))
-async def admin_setprice(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    try:
-        _, name, price = message.text.split()
-        price = int(price)
-        c.execute("UPDATE products SET price = ? WHERE name = ?", (price, name))
-        conn.commit()
-        await message.answer(f"✅ Цена '{name}' изменена на {price}⭐")
-    except:
-        await message.answer("❌ Формат: /setprice Название 100")
+# ==================== АДМИН ПАНЕЛЬ ====================
+def admin_main_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📦 Управление товарами", callback_data="admin_products")
+    builder.button(text="📊 Статистика", callback_data="admin_stats")
+    builder.button(text="📢 Рассылка", callback_data="admin_broadcast")
+    builder.button(text="➕ Добавить товар", callback_data="admin_add_product")
+    builder.adjust(1)
+    return builder.as_markup()
 
-# АДМИН: ПЕРЕИМЕНОВАТЬ ТОВАР
-@router.message(Command("renameproduct"))
-async def admin_rename(message: Message):
+@router.message(Command("admin"))
+async def admin_panel(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
-    try:
-        _, old_name, new_name = message.text.split(maxsplit=2)
-        c.execute("UPDATE products SET name = ? WHERE name = ?", (new_name, old_name))
-        conn.commit()
-        await message.answer(f"✅ Товар '{old_name}' переименован в '{new_name}'")
-    except:
-        await message.answer("❌ Формат: /renameproduct Старое_название Новое_название")
+    await message.answer("👨‍💻 **Панель администратора**", reply_markup=admin_main_keyboard(), parse_mode="Markdown")
 
-# АДМИН: СТАТИСТИКА
-@router.message(Command("stats"))
-async def admin_stats(message: Message):
-    if message.from_user.id != ADMIN_ID:
+# ---- УПРАВЛЕНИЕ ТОВАРАМИ ----
+@router.callback_query(F.data == "admin_products")
+async def admin_products_list(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
         return
+    
+    builder = InlineKeyboardBuilder()
+    c.execute("SELECT id, name, price FROM products")
+    products = c.fetchall()
+    
+    if not products:
+        await callback.answer("📭 Список товаров пуст")
+        return
+    
+    for prod_id, prod_name, prod_price in products:
+        builder.button(text=f"{prod_name} - {prod_price}⭐", callback_data=f"admin_edit_{prod_id}")
+    
+    builder.button(text="◀️ Назад", callback_data="admin_back")
+    builder.adjust(1)
+    await callback.message.edit_text("📦 **Выберите товар для редактирования:**", reply_markup=builder.as_markup(), parse_mode="Markdown")
+
+# ---- РЕДАКТИРОВАНИЕ КОНКРЕТНОГО ТОВАРА ----
+@router.callback_query(F.data.startswith("admin_edit_"))
+async def admin_edit_product(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    
+    product_id = int(callback.data.split("_")[2])
+    c.execute("SELECT name, price FROM products WHERE id=?", (product_id,))
+    prod_name, prod_price = c.fetchone()
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Изменить название", callback_data=f"admin_change_name_{product_id}")],
+        [InlineKeyboardButton(text="💰 Изменить цену", callback_data=f"admin_change_price_{product_id}")],
+        [InlineKeyboardButton(text="🗑️ Удалить товар", callback_data=f"admin_delete_{product_id}")],
+        [InlineKeyboardButton(text="◀️ Назад к списку", callback_data="admin_products")]
+    ])
+    
+    await callback.message.edit_text(
+        f"📦 **Редактирование товара**\n\n🆔 ID: `{product_id}`\n📛 Название: `{prod_name}`\n💰 Цена: `{prod_price}⭐`\n\nВыберите действие:",
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
+
+# ---- ВВОД НОВОГО НАЗВАНИЯ ----
+@router.callback_query(F.data.startswith("admin_change_name_"))
+async def admin_change_name_handler(callback: CallbackQuery):
+    product_id = int(callback.data.split("_")[3])
+    await callback.answer(f"✏️ Теперь отправьте новое название для товара ID {product_id} в чат", show_alert=True)
+    # Сохраняем ID товара для следующего сообщения
+    await callback.message.answer(f"✏️ Отправьте новое название для товара ID {product_id}:")
+
+# ---- ВВОД НОВОЙ ЦЕНЫ ----
+@router.callback_query(F.data.startswith("admin_change_price_"))
+async def admin_change_price_handler(callback: CallbackQuery):
+    product_id = int(callback.data.split("_")[3])
+    await callback.answer(f"💰 Теперь отправьте новую цену в звездах для товара ID {product_id} в чат", show_alert=True)
+    await callback.message.answer(f"💰 Отправьте новую цену (число) для товара ID {product_id}:")
+
+# ---- ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ ДЛЯ РЕДАКТИРОВАНИЯ ----
+@router.message(F.text & F.from_user.id == ADMIN_ID)
+async def admin_text_handler(message: Message):
+    text = message.text.strip()
+    
+    # Если это ответ на запрос нового названия
+    if "Отправьте новое название для товара ID" in message.reply_to_message.text:
+        try:
+            product_id = int(message.reply_to_message.text.split("ID ")[1].replace(":", ""))
+            c.execute("UPDATE products SET name = ? WHERE id = ?", (text, product_id))
+            conn.commit()
+            await message.answer(f"✅ Название товара ID {product_id} изменено на: {text}")
+        except:
+            await message.answer("❌ Ошибка")
+    
+    # Если это ответ на запрос новой цены
+    elif "Отправьте новую цену" in message.reply_to_message.text:
+        try:
+            product_id = int(message.reply_to_message.text.split("ID ")[1].split(":")[0])
+            price = int(text)
+            c.execute("UPDATE products SET price = ? WHERE id = ?", (price, product_id))
+            conn.commit()
+            await message.answer(f"✅ Цена товара ID {product_id} изменена на: {price}⭐")
+        except:
+            await message.answer("❌ Ошибка. Нужно число.")
+
+# ---- УДАЛЕНИЕ ТОВАРА ----
+@router.callback_query(F.data.startswith("admin_delete_"))
+async def admin_delete_product(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    
+    product_id = int(callback.data.split("_")[2])
+    c.execute("DELETE FROM products WHERE id=?", (product_id,))
+    conn.commit()
+    await callback.answer(f"🗑️ Товар ID {product_id} удален", show_alert=True)
+    await admin_products_list(callback)
+
+# ---- ДОБАВЛЕНИЕ ТОВАРА ----
+@router.callback_query(F.data == "admin_add_product")
+async def admin_add_product_handler(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    
+    await callback.answer("➕ Теперь отправьте название и цену в формате: Название | Цена", show_alert=True)
+    await callback.message.answer("➕ Для добавления товара отправьте в формате:\n`Название товара | 100`")
+
+# Обработка добавления через сообщение
+@router.message(F.text.contains("|") & F.from_user.id == ADMIN_ID)
+async def admin_add_product_text(message: Message):
+    try:
+        name, price = message.text.split("|")
+        name = name.strip()
+        price = int(price.strip())
+        
+        c.execute("INSERT INTO products (name, price) VALUES (?, ?)", (name, price))
+        conn.commit()
+        await message.answer(f"✅ Товар добавлен:\n📛 {name}\n💰 {price}⭐")
+    except:
+        await message.answer("❌ Ошибка формата. Используйте: Название | 100")
+
+# ---- СТАТИСТИКА ----
+@router.callback_query(F.data == "admin_stats")
+async def admin_stats_handler(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    
     c.execute("SELECT COUNT(*) FROM users")
     users = c.fetchone()[0]
     c.execute("SELECT COUNT(*), SUM(amount) FROM payments")
     pays, stars = c.fetchone()
     stars = stars if stars else 0
-    await message.answer(f"📊 **Статистика**\n👥 Пользователей: {users}\n💰 Платежей: {pays}\n⭐️ Всего звёзд: {stars}")
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back")]
+    ])
+    
+    await callback.message.edit_text(
+        f"📊 **Статистика**\n\n👥 Пользователей: `{users}`\n💰 Платежей: `{pays}`\n⭐️ Всего звёзд: `{stars}`\n\n💾 База: `scam_bot.db`",
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
 
-# АДМИН: РАССЫЛКА
-@router.message(Command("broadcast"))
-async def admin_broadcast(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    broadcast_text = message.text.split(' ', 1)[1] if ' ' in message.text else None
-    if not broadcast_text:
-        await message.answer("❌ Формат: /broadcast Ваш текст")
+# ---- РАССЫЛКА ----
+@router.callback_query(F.data == "admin_broadcast")
+async def admin_broadcast_handler(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
         return
     
-    c.execute("SELECT user_id FROM users")
-    users = c.fetchall()
-    sent = 0
-    for (user_id,) in users:
-        try:
-            await bot.send_message(user_id, broadcast_text)
-            sent += 1
-        except:
-            pass
-    await message.answer(f"✅ Рассылка отправлена {sent}/{len(users)} пользователям")
+    await callback.answer("📢 Теперь отправьте текст рассылки в чат", show_alert=True)
+    await callback.message.answer("📢 Отправьте текст для рассылки всем пользователям:")
 
-# ЗАПУСК
+@router.message(F.text & F.from_user.id == ADMIN_ID)
+async def admin_broadcast_text(message: Message):
+    # Проверяем, что это ответ на запрос рассылки
+    if message.reply_to_message and "Отправьте текст для рассылки" in message.reply_to_message.text:
+        c.execute("SELECT user_id FROM users")
+        users = c.fetchall()
+        sent = 0
+        for (user_id,) in users:
+            try:
+                await bot.send_message(user_id, message.text)
+                sent += 1
+            except:
+                pass
+        await message.answer(f"✅ Рассылка отправлена {sent}/{len(users)} пользователям")
+
+# ---- КНОПКА НАЗАД ----
+@router.callback_query(F.data == "admin_back")
+async def admin_back_handler(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    await callback.message.edit_text("👨‍💻 **Панель администратора**", reply_markup=admin_main_keyboard(), parse_mode="Markdown")
+
+# ==================== ЗАПУСК ====================
 async def main():
     global bot
     bot = Bot(token=BOT_TOKEN)
