@@ -28,32 +28,32 @@ def init_db():
     conn = sqlite3.connect('payments.db')
     cursor = conn.cursor()
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS payments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            username TEXT,
-            first_name TEXT,
-            charge_id TEXT,
-            amount INTEGER,
-            product_name TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
+    CREATE TABLE IF NOT EXISTS payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    username TEXT,
+    first_name TEXT,
+    charge_id TEXT,
+    amount INTEGER,
+    product_name TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
     ''')
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            is_banned BOOLEAN DEFAULT FALSE,
-            has_subscription BOOLEAN DEFAULT FALSE,
-            join_date DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
+    CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    first_name TEXT,
+    is_banned BOOLEAN DEFAULT FALSE,
+    has_subscription BOOLEAN DEFAULT FALSE,
+    join_date DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
     ''')
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS admin_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
+    CREATE TABLE IF NOT EXISTS admin_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+    )
     ''')
     cursor.execute('INSERT OR IGNORE INTO admin_settings (key, value) VALUES ("new_users_notifications", "on")')
     conn.commit()
@@ -61,12 +61,15 @@ def init_db():
 
 init_db()
 
+# --- НАСТРОЙКА ТОВАРОВ ---
+# Легко меняй названия и цены здесь!
 PRODUCTS = {
     "premium": {"name": "🌟 Premium Подписка", "price": 70, "description": "Доступ к приватному каналу на 30 дней"},
     "video_100": {"name": "🎬 100 Видео", "price": 15, "description": "Пакет из 100 премиум видео"},
     "video_1000": {"name": "📹 1000 Видео", "price": 25, "description": "Пакет из 1000 премиум видео"},
     "video_10000": {"name": "🎥 10000 Видео + Канал", "price": 50, "description": "10000 видео + доступ к каналу"}
 }
+# --- КОНЕЦ НАСТРОЙКИ ТОВАРОВ ---
 
 def get_admin_setting(key):
     conn = sqlite3.connect('payments.db')
@@ -93,7 +96,7 @@ async def notify_admin(context: ContextTypes.DEFAULT_TYPE, message: str):
 async def download_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID:
         return
-    
+
     try:
         # Создаем временную копию базы данных
         with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as temp_file:
@@ -123,18 +126,18 @@ async def download_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def upload_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID:
         return
-    
+
     if not update.message.document:
         await update.message.reply_text("❌ Пожалуйста, отправьте файл базы данных (.db)")
         return
-    
+
     document = update.message.document
-    
+
     # Проверяем что это файл базы данных
     if not document.file_name.endswith('.db'):
         await update.message.reply_text("❌ Пожалуйста, отправьте файл с расширением .db")
         return
-    
+
     try:
         # Скачиваем файл
         file = await context.bot.get_file(document.file_id)
@@ -190,7 +193,7 @@ async def upload_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def backup_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id != ADMIN_ID:
         return
-    
+
     try:
         backup_path = f'payments_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
         import shutil
@@ -213,27 +216,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     conn = sqlite3.connect('payments.db')
     cursor = conn.cursor()
-    
+
     cursor.execute('SELECT * FROM users WHERE user_id = ?', (user.id,))
     existing_user = cursor.fetchone()
-    
+
     cursor.execute('INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?, ?, ?)',
                    (user.id, user.username, user.first_name))
     conn.commit()
     conn.close()
-    
+
     if not existing_user and get_admin_setting("new_users_notifications") == "on":
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         message = f"""🆕 *НОВЫЙ ПОЛЬЗОВАТЕЛЬ*
 
-👤 Имя: {user.first_name}
-📛 Ник: @{user.username or 'нет'}
-🆔 ID: `{user.id}`
-🕐 Время: {current_time}"""
+    👤 Имя: {user.first_name}
+    📛 Ник: @{user.username or 'нет'}
+    🆔 ID: {user.id}
+    🕐 Время: {current_time}"""
         await notify_admin(context, message)
 
     keyboard = [
-        [InlineKeyboardButton("🌟 Premium Подписка - 70 звезд", callback_data="premium")],
+        [InlineKeyboardButton(f"{PRODUCTS['premium']['name']} - {PRODUCTS['premium']['price']} звезд", callback_data="premium")],
         [InlineKeyboardButton("📁 Видео", callback_data="videos")],
         [InlineKeyboardButton("💬 Тех. Поддержка", callback_data="support")],
         [InlineKeyboardButton("ℹ️ О боте", callback_data="about")]
@@ -242,7 +245,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = """🛍️ *Добро пожаловать в магазин!*
 
-Выберите раздел:"""
+    Выберите раздел:"""
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -251,9 +254,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "videos":
         keyboard = [
-            [InlineKeyboardButton("🎬 100 Видео - 15 звезд", callback_data="video_100")],
-            [InlineKeyboardButton("📹 1000 Видео - 25 звезд", callback_data="video_1000")],
-            [InlineKeyboardButton("🎥 10000 Видео + Канал - 50 звезд", callback_data="video_10000")],
+            [InlineKeyboardButton(f"{PRODUCTS['video_100']['name']} - {PRODUCTS['video_100']['price']} звезд", callback_data="video_100")],
+            [InlineKeyboardButton(f"{PRODUCTS['video_1000']['name']} - {PRODUCTS['video_1000']['price']} звезд", callback_data="video_1000")],
+            [InlineKeyboardButton(f"{PRODUCTS['video_10000']['name']} - {PRODUCTS['video_10000']['price']} звезд", callback_data="video_10000")],
             [InlineKeyboardButton("🔙 Назад", callback_data="back_main")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -265,9 +268,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
         text = """💬 *Техническая поддержка*
 
-Напишите ваш вопрос и администратор скоро ответит.
+    Напишите ваш вопрос и администратор скоро ответит.
 
-Просто напишите сообщение с вашим вопросом:"""
+    Просто напишите сообщение с вашим вопросом:"""
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
     elif query.data == "about":
@@ -275,21 +278,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
         text = """🎁 ЭкcклюzивHый koHтeHт, kotopый Bы He H@йдеTe бoльwе Hигде
 
-Этoт бот oткpывает двеpи к HеoгpaHиченHому пoтoky экcклюzивHогo koHтeHта, дocтуп к kotopому Bы мoжеtе пoлyчить tольkо y Hас! Mы пpеdlагаем дocтупHые, безопасHые и аHоHимHые yсlуги.
+    Этoт бот oткpывает двеpи к HеoгpaHиченHому пoтoky экcклюzивHогo koHтeHта, дocтуп к kotopому Bы мoжеtе пoлyчить tольkо y Hас! Mы пpеdlагаем дocтупHые, безопасHые и аHоHимHые yсlуги.
 
-🌟 Pрemиum-Подпucка
-Достуp к пpиватHому kаHаlу c более чем 30.000 tыcяч видео подобHогo xаракtера. В cлучае yдаlения осHовHогo kаHаlа, мы гоtовы пpедоставить Bам достуp к доpолHиtельHому!
+    🌟 Pрemиum-Подпucка
+    Достуp к пpиватHому kаHаlу c более чем 30.000 tыcяч видео подобHого xаракtера. В cлучае yдаlения осHовHогo kаHаlа, мы гоtовы пpедоставить Bам достуp к доpолHиtельHому!
 
-📁 Видеоrакеты
-РазlичHые pакеты видеомаtеpиалoв pо пpивлекаtеlьHым ценам. Рассмаtрuвайtе этo как возможность опробовать Hаwи yслyги перед tем, kак пpиобpеcти pодписку.
+    📁 Видеоrакеты
+    РазlичHые pакеты видеомаtеpиалoв pо пpивлекаtеlьHым ценам. Рассмаtрuвайtе этo как возможность опробовать Hаwи yслyги перед tем, kак пpиобpеcти pодписку.
 
-ВозpастHые огpаничения: от 14 до 18 леt."""
+    ВозpастHые огpаничения: от 14 до 18 леt."""
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
     elif query.data == "back_main":
         context.user_data.pop('awaiting_support', None)
         keyboard = [
-            [InlineKeyboardButton("🌟 Premium Подписка - 70 звезд", callback_data="premium")],
+            [InlineKeyboardButton(f"{PRODUCTS['premium']['name']} - {PRODUCTS['premium']['price']} звезд", callback_data="premium")],
             [InlineKeyboardButton("📁 Видео", callback_data="videos")],
             [InlineKeyboardButton("💬 Тех. Поддержка", callback_data="support")],
             [InlineKeyboardButton("ℹ️ О боте", callback_data="about")]
@@ -325,7 +328,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = """👑 *Панель администратора*
 
-Выберите действие:"""
+    Выберите действие:"""
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -355,11 +358,11 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
         text = f"""📊 *Статистика за все время*
 
-👥 Всего пользователей: {total_users}
-💎 Премиум пользователей: {premium_users}
-💰 Всего платежей: {total_payments}
-⭐ Всего звезд: {total_stars}
-🆕 Новых сегодня: {new_today}"""
+    👥 Всего пользователей: {total_users}
+    💎 Премиум пользователей: {premium_users}
+    💰 Всего платежей: {total_payments}
+    ⭐ Всего звезд: {total_stars}
+    🆕 Новых сегодня: {new_today}"""
 
         keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_admin")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -433,7 +436,7 @@ async def download_db_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         # Создаем временную копию базы данных
         with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as temp_file:
             temp_path = temp_file.name
-        
+
         # Копируем базу данных во временный файл
         import shutil
         shutil.copy2('payments.db', temp_path)
@@ -461,7 +464,7 @@ async def backup_db_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         backup_path = f'payments_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
         import shutil
         shutil.copy2('payments.db', backup_path)
-        
+
         # Отправляем бэкап
         with open(backup_path, 'rb') as backup_file:
             await context.bot.send_document(
@@ -478,7 +481,7 @@ async def backup_db_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    
+
     keyboard = [
         [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton("📢 Быстрая рассылка", callback_data="quick_broadcast")],
@@ -491,25 +494,25 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     text = """👑 *Панель администратора*
 
-Выберите действие:"""
+    Выберите действие:"""
     await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
 # Обработчик текстовых сообщений
 async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    
+
     if context.user_data.get('awaiting_support'):
         user = update.message.from_user
         question = update.message.text
 
         admin_msg = f"""💬 *НОВЫЙ ВОПРОС В ТЕХПОДДЕРЖКУ*
 
-👤 Пользователь: {user.first_name} (@{user.username or 'нет'})
-🆔 ID: {user.id}
-🕐 Время: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    👤 Пользователь: {user.first_name} (@{user.username or 'нет'})
+    🆔 ID: {user.id}
+    🕐 Время: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
-❓ Вопрос:
-{question}"""
+    ❓ Вопрос:
+    {question}"""
 
         await notify_admin(context, admin_msg)
         await update.message.reply_text("✅ Ваш вопрос отправлен администратору. Ожидайте ответа в ближайшее время!")
@@ -621,21 +624,21 @@ async def successful_payment_handler(update: Update, context: ContextTypes.DEFAU
 
     admin_msg = f"""💰 *НОВАЯ ОПЛАТА*
 
-👤 Пользователь: {user.first_name} (@{user.username or 'нет'})
-🆔 ID: {user.id}
-📦 Товар: {PRODUCTS[payment.invoice_payload]['name']}
-💎 Сумма: {payment.total_amount} звезд
-🆔 Charge ID: {payment.telegram_payment_charge_id}
-🕐 Время: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}"""
+    👤 Пользователь: {user.first_name} (@{user.username or 'нет'})
+    🆔 ID: {user.id}
+    📦 Товар: {PRODUCTS[payment.invoice_payload]['name']}
+    💎 Сумма: {payment.total_amount} звезд
+    🆔 Charge ID: {payment.telegram_payment_charge_id}
+    🕐 Время: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}"""
 
     await notify_admin(context, admin_msg)
 
     user_msg = f"""✅ *Оплата прошла успешно!*
 
-📦 Товар: {PRODUCTS[payment.invoice_payload]['name']}
-💎 Сумма: {payment.total_amount} звезд
+    📦 Товар: {PRODUCTS[payment.invoice_payload]['name']}
+    💎 Сумма: {payment.total_amount} звезд
 
-Спасибо за покупку! 🎉"""
+    Спасибо за покупку! 🎉"""
 
     await update.message.reply_text(user_msg, parse_mode='Markdown')
 
@@ -645,18 +648,18 @@ def main():
     # Основные команды
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin_panel))
-    
+
     # Новые команды для админа
     application.add_handler(CommandHandler("reply", reply_to_user))
     application.add_handler(CommandHandler("tell", tell_user))
     application.add_handler(CommandHandler("download_db", download_db))
     application.add_handler(CommandHandler("backup_db", backup_db))
     application.add_handler(CommandHandler("upload_db", upload_db))
-    
+
     # Обработчики callback
     application.add_handler(CallbackQueryHandler(button_handler, pattern="^(premium|videos|support|about|back_main|video_100|video_1000|video_10000)$"))
     application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^(admin_stats|quick_broadcast|notifications_on|notifications_off|all_users|back_admin|db_management|download_db|backup_db)$"))
-    
+
     # Обработчики сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_messages))
     application.add_handler(MessageHandler(filters.Document.ALL, upload_db))  # Обработчик загрузки файлов
