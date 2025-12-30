@@ -5,8 +5,7 @@ from datetime import datetime
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.types import (
     Message, CallbackQuery, LabeledPrice, PreCheckoutQuery,
-    InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle,
-    InputTextMessageContent, InlineQuery, ChosenInlineResult
+    InlineKeyboardButton, InlineKeyboardMarkup
 )
 from aiogram.filters import Command, CommandStart
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -24,7 +23,6 @@ c = conn.cursor()
 c.execute('''CREATE TABLE IF NOT EXISTS payments (user_id INT, amount INT, charge_id TEXT, date TEXT)''')
 c.execute('''CREATE TABLE IF NOT EXISTS users (user_id INT PRIMARY KEY, join_date TEXT)''')
 c.execute('''CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, price INT)''')
-# Начальные товары
 c.execute("INSERT OR IGNORE INTO products (name, price) VALUES ('Доступ к каналу', 50), ('1000 видео', 25), ('500 видео', 10)")
 conn.commit()
 
@@ -150,43 +148,98 @@ async def admin_edit_product(callback: CallbackQuery):
 # ---- ВВОД НОВОГО НАЗВАНИЯ ----
 @router.callback_query(F.data.startswith("admin_change_name_"))
 async def admin_change_name_handler(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    
     product_id = int(callback.data.split("_")[3])
-    await callback.answer(f"✏️ Теперь отправьте новое название для товара ID {product_id} в чат", show_alert=True)
-    # Сохраняем ID товара для следующего сообщения
+    # Сохраняем ID товара в глобальную переменную (упрощённый подход)
+    global editing_product_id, editing_mode
+    editing_product_id = product_id
+    editing_mode = "name"
+    
+    await callback.answer(f"✏️ Теперь отправьте новое название в чат", show_alert=True)
     await callback.message.answer(f"✏️ Отправьте новое название для товара ID {product_id}:")
 
 # ---- ВВОД НОВОЙ ЦЕНЫ ----
 @router.callback_query(F.data.startswith("admin_change_price_"))
 async def admin_change_price_handler(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    
     product_id = int(callback.data.split("_")[3])
-    await callback.answer(f"💰 Теперь отправьте новую цену в звездах для товара ID {product_id} в чат", show_alert=True)
+    global editing_product_id, editing_mode
+    editing_product_id = product_id
+    editing_mode = "price"
+    
+    await callback.answer(f"💰 Теперь отправьте новую цену в чат", show_alert=True)
     await callback.message.answer(f"💰 Отправьте новую цену (число) для товара ID {product_id}:")
 
-# ---- ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ ДЛЯ РЕДАКТИРОВАНИЯ ----
+# ---- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ДЛЯ РЕДАКТИРОВАНИЯ ----
+editing_product_id = None
+editing_mode = None  # "name" или "price"
+
+# ---- ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ ОТ АДМИНА ----
 @router.message(F.text & F.from_user.id == ADMIN_ID)
 async def admin_text_handler(message: Message):
+    global editing_product_id, editing_mode
+    
     text = message.text.strip()
     
-    # Если это ответ на запрос нового названия
-    if "Отправьте новое название для товара ID" in message.reply_to_message.text:
+    # Если включён режим редактирования названия
+    if editing_mode == "name" and editing_product_id:
         try:
-            product_id = int(message.reply_to_message.text.split("ID ")[1].replace(":", ""))
-            c.execute("UPDATE products SET name = ? WHERE id = ?", (text, product_id))
+            c.execute("UPDATE products SET name = ? WHERE id = ?", (text, editing_product_id))
             conn.commit()
-            await message.answer(f"✅ Название товара ID {product_id} изменено на: {text}")
-        except:
-            await message.answer("❌ Ошибка")
+            await message.answer(f"✅ Название товара ID {editing_product_id} изменено на: {text}")
+            editing_mode = None
+            editing_product_id = None
+            return
+        except Exception as e:
+            await message.answer(f"❌ Ошибка: {e}")
+            return
     
-    # Если это ответ на запрос новой цены
-    elif "Отправьте новую цену" in message.reply_to_message.text:
+    # Если включён режим редактирования цены
+    elif editing_mode == "price" and editing_product_id:
         try:
-            product_id = int(message.reply_to_message.text.split("ID ")[1].split(":")[0])
             price = int(text)
-            c.execute("UPDATE products SET price = ? WHERE id = ?", (price, product_id))
+            c.execute("UPDATE products SET price = ? WHERE id = ?", (price, editing_product_id))
             conn.commit()
-            await message.answer(f"✅ Цена товара ID {product_id} изменена на: {price}⭐")
+            await message.answer(f"✅ Цена товара ID {editing_product_id} изменена на: {price}⭐")
+            editing_mode = None
+            editing_product_id = None
+            return
         except:
             await message.answer("❌ Ошибка. Нужно число.")
+            return
+    
+    # Если это добавление товара (формат: Название | Цена)
+    if "|" in text:
+        try:
+            name, price = text.split("|")
+            name = name.strip()
+            price = int(price.strip())
+            
+            c.execute("INSERT INTO products (name, price) VALUES (?, ?)", (name, price))
+            conn.commit()
+            await message.answer(f"✅ Товар добавлен:\n📛 {name}\n💰 {price}⭐")
+            return
+        except:
+            await message.answer("❌ Ошибка формата. Используйте: Название | 100")
+            return
+    
+    # Если это рассылка (проверяем по контексту)
+    if message.reply_to_message and "рассылка" in message.reply_to_message.text.lower():
+        c.execute("SELECT user_id FROM users")
+        users = c.fetchall()
+        sent = 0
+        for (user_id,) in users:
+            try:
+                await bot.send_message(user_id, text)
+                sent += 1
+            except:
+                pass
+        await message.answer(f"✅ Рассылка отправлена {sent}/{len(users)} пользователям")
+        return
 
 # ---- УДАЛЕНИЕ ТОВАРА ----
 @router.callback_query(F.data.startswith("admin_delete_"))
@@ -208,20 +261,6 @@ async def admin_add_product_handler(callback: CallbackQuery):
     
     await callback.answer("➕ Теперь отправьте название и цену в формате: Название | Цена", show_alert=True)
     await callback.message.answer("➕ Для добавления товара отправьте в формате:\n`Название товара | 100`")
-
-# Обработка добавления через сообщение
-@router.message(F.text.contains("|") & F.from_user.id == ADMIN_ID)
-async def admin_add_product_text(message: Message):
-    try:
-        name, price = message.text.split("|")
-        name = name.strip()
-        price = int(price.strip())
-        
-        c.execute("INSERT INTO products (name, price) VALUES (?, ?)", (name, price))
-        conn.commit()
-        await message.answer(f"✅ Товар добавлен:\n📛 {name}\n💰 {price}⭐")
-    except:
-        await message.answer("❌ Ошибка формата. Используйте: Название | 100")
 
 # ---- СТАТИСТИКА ----
 @router.callback_query(F.data == "admin_stats")
@@ -253,21 +292,6 @@ async def admin_broadcast_handler(callback: CallbackQuery):
     
     await callback.answer("📢 Теперь отправьте текст рассылки в чат", show_alert=True)
     await callback.message.answer("📢 Отправьте текст для рассылки всем пользователям:")
-
-@router.message(F.text & F.from_user.id == ADMIN_ID)
-async def admin_broadcast_text(message: Message):
-    # Проверяем, что это ответ на запрос рассылки
-    if message.reply_to_message and "Отправьте текст для рассылки" in message.reply_to_message.text:
-        c.execute("SELECT user_id FROM users")
-        users = c.fetchall()
-        sent = 0
-        for (user_id,) in users:
-            try:
-                await bot.send_message(user_id, message.text)
-                sent += 1
-            except:
-                pass
-        await message.answer(f"✅ Рассылка отправлена {sent}/{len(users)} пользователям")
 
 # ---- КНОПКА НАЗАД ----
 @router.callback_query(F.data == "admin_back")
